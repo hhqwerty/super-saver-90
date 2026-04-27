@@ -1,0 +1,668 @@
+{
+  "name": "Receipt Finance Tracker",
+  "nodes": [
+
+    {
+      "id": "trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [180, 340],
+      "webhookId": "receipt-finance-webhook",
+      "parameters": { "updates": ["message", "callback_query"], "additionalFields": {} },
+      "credentials": { "telegramApi": { "id": "1", "name": "Telegram Bot" } }
+    },
+
+    {
+      "id": "is-callback",
+      "name": "Callback or Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [400, 340],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "cb1", "leftValue": "={{ $json.callback_query }}", "rightValue": "", "operator": { "type": "object", "operation": "exists", "singleValue": true } }],
+          "combinator": "and"
+        }
+      }
+    },
+
+    {
+      "id": "parse-callback",
+      "name": "Parse Callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [620, 180],
+      "parameters": {
+        "jsCode": "const cq = $input.first().json.callback_query;\nconst [idStr, action] = (cq.data || '').split(':');\nconst categoryMap = {\n  'an_uong':  { en: 'Dining',        vi: '🍜 Ăn uống' },\n  'tieu_vat': { en: 'Shopping',      vi: '🛍 Tiêu vặt' },\n  'vay':      { en: 'Transfer',      vi: '💸 Vay' },\n  'nha_cua':  { en: 'Utilities',     vi: '🏠 Nhà cửa' },\n  'luong':    { en: 'Salary',        vi: '💼 Lương' },\n  'dau_tu':   { en: 'Investment',    vi: '📈 Đầu tư' },\n  'tra_no':   { en: 'Debt_Repaid',   vi: '🤝 Được trả nợ' },\n  'thuong':   { en: 'Bonus',         vi: '🎁 Thưởng' },\n  'thu_khac': { en: 'Other_Income',  vi: '💰 Thu khác' },\n};\nconst merchantMap = {\n  'merchant_hoang': 'HOANG NHAT HOANG',\n  'merchant_dung':  'LE THI THANH DUNG',\n};\nconst cat = categoryMap[action];\nconst merchantName = merchantMap[action] || null;\nreturn [{ json: {\n  receipt_id:        parseInt(idStr),\n  action:            action,\n  is_edit:           action === 'edit',\n  is_category:       !!cat,\n  is_merchant_select: !!merchantName,\n  merchant_name:     merchantName,\n  category_en:       cat ? cat.en : null,\n  category_vi:       cat ? cat.vi : null,\n  cq_id:             cq.id,\n  chat_id:           cq.message.chat.id,\n  message_id:        cq.message.message_id,\n}}];"
+      }
+    },
+
+    {
+      "id": "is-merchant-select",
+      "name": "Is Merchant Select?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [840, 180],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "m1", "leftValue": "={{ $json.is_merchant_select }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equals" } }],
+          "combinator": "and"
+        }
+      }
+    },
+
+    {
+      "id": "set-merchant",
+      "name": "Set Merchant",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1060, 60],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE receipts SET merchant = '{{ $json.merchant_name.replace(/'/g,\"''\") }}', owner_name = '{{ $json.merchant_name.replace(/'/g,\"''\") }}' WHERE id = {{ $json.receipt_id }} AND chat_id = {{ $json.chat_id }} RETURNING id, merchant, total_amount, currency, date, transaction_time, transaction_type, owner_name",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "2", "name": "Postgres n8n DB" } }
+    },
+
+    {
+      "id": "answer-cb-merchant",
+      "name": "Answer Callback (Merchant)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1280, 60],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={\"callback_query_id\": \"{{ $('Parse Callback').first().json.cq_id }}\", \"text\": \"✅ {{ $('Set Merchant').first().json.merchant }}\"}",
+        "options": {}
+      }
+    },
+
+    {
+      "id": "build-merchant-payload",
+      "name": "Build Merchant Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 60],
+      "parameters": {
+        "jsCode": "const cb = $('Parse Callback').first().json;\nconst r = $('Set Merchant').first().json;\nconst amt = Number(r.total_amount).toLocaleString('vi-VN');\nconst timeVal = r.transaction_time ? String(r.transaction_time).slice(0,5) + ' ' : '';\nconst [y,m,d] = String(r.date).split('T')[0].split('-');\nconst dateDisplay = timeVal + d+'/'+m+'/'+y;\nconst isIncome = r.transaction_type === 'income';\nconst typeIcon = isIncome ? '💚 Thu nhập' : '🔴 Chi tiêu';\nconst text = '📋 *Đã đọc hoá đơn:*\\n🏪 ' + r.merchant + '\\n💰 ' + amt + ' ' + r.currency + '\\n📅 ' + dateDisplay + '\\n' + typeIcon + '\\n\\nChọn danh mục:';\nconst sid = String(r.id);\nconst editUrl = sid+':edit';\nconst keyboard = isIncome ? [\n  [{text: '💼 Lương', callback_data: sid+':luong'}, {text: '📈 Đầu tư', callback_data: sid+':dau_tu'}],\n  [{text: '🤝 Được trả nợ', callback_data: sid+':tra_no'}, {text: '🎁 Thưởng', callback_data: sid+':thuong'}],\n  [{text: '💰 Thu khác', callback_data: sid+':thu_khac'}],\n  [{text: '✏️ Chỉnh sửa', callback_data: editUrl}]\n] : [\n  [{text: '🍜 Ăn uống', callback_data: sid+':an_uong'}, {text: '🛍 Tiêu vặt', callback_data: sid+':tieu_vat'}],\n  [{text: '💸 Vay', callback_data: sid+':vay'}, {text: '🏠 Nhà cửa', callback_data: sid+':nha_cua'}],\n  [{text: '✏️ Chỉnh sửa', callback_data: editUrl}]\n];\nreturn [{ json: { chat_id: cb.chat_id, message_id: cb.message_id, text: text, keyboard: keyboard } }];"
+      }
+    },
+
+    {
+      "id": "update-msg-merchant",
+      "name": "Update Message Merchant",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1720, 60],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, message_id: $json.message_id, parse_mode: 'Markdown', text: $json.text, reply_markup: { inline_keyboard: $json.keyboard } }) }}",
+        "options": {}
+      }
+    },
+
+    {
+      "id": "is-edit",
+      "name": "Edit or Category?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [840, 280],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "e1", "leftValue": "={{ $json.is_edit }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equals" } }],
+          "combinator": "and"
+        }
+      }
+    },
+
+    {
+      "id": "get-draft-for-edit",
+      "name": "Get Draft Fields",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1060, 100],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT id, merchant, total_amount, currency, date, transaction_time FROM receipts WHERE id = {{ $json.receipt_id }}",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "2", "name": "Postgres n8n DB" } }
+    },
+    {
+      "id": "answer-cb-edit",
+      "name": "Answer Callback (Edit)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1280, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={\"callback_query_id\": \"{{ $('Parse Callback').first().json.cq_id }}\", \"text\": \"✏️ Chỉnh sửa\"}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-edit-form-payload",
+      "name": "Build Edit Form Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 100],
+      "parameters": {
+        "jsCode": "const cb = $('Parse Callback').first().json;\nconst dr = $('Get Draft Fields').first().json;\nconst timeVal = dr.transaction_time ? String(dr.transaction_time).slice(0,5) : '';\nconst [y,m,d] = String(dr.date).split('T')[0].split('-');\nconst dateDisplay = d + '/' + m + '/' + y;\nconst merchantVal = dr.merchant || '';\nconst text = '✏️ Chỉnh sửa thông tin (reply để cập nhật):\\n\\nmerchant: ' + merchantVal + '\\namount: ' + dr.total_amount + '\\ncurrency: ' + dr.currency + '\\ndate: ' + dateDisplay + '\\ntime: ' + timeVal;\nreturn [{ json: { chat_id: cb.chat_id, text: text } }];"
+      }
+    },
+    {
+      "id": "send-edit-form",
+      "name": "Send Edit Form",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1720, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, text: $json.text, reply_markup: { force_reply: true, selective: true, input_field_placeholder: 'Chỉnh sửa rồi reply' } }) }}",
+        "options": {}
+      }
+    },
+
+    {
+      "id": "save-category",
+      "name": "Save Category",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1060, 280],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE receipts SET category = '{{ $json.category_en }}', category_vi = '{{ $json.category_vi }}', status = 'categorized' WHERE id = {{ $json.receipt_id }} RETURNING id, merchant, total_amount, currency, date, transaction_time, category_vi",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "2", "name": "Postgres n8n DB" } }
+    },
+    {
+      "id": "answer-cb-cat",
+      "name": "Answer Callback (Category)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1280, 280],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={\"callback_query_id\": \"{{ $('Parse Callback').first().json.cq_id }}\", \"text\": \"✓ {{ $('Save Category').first().json.category_vi }}\"}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-remove-kb-payload",
+      "name": "Build Remove KB Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 280],
+      "parameters": {
+        "jsCode": "const cb = $('Parse Callback').first().json;\nconst r = $('Save Category').first().json;\nconst timeVal = r.transaction_time ? String(r.transaction_time).slice(0,5) + ' ' : '';\nconst [y,m,d] = String(r.date).split('T')[0].split('-');\nconst dateStr = timeVal + d + '/' + m + '/' + y;\nconst text = '📋 *Hoá đơn:*\\n🏪 ' + r.merchant + '\\n💰 ' + r.total_amount + ' ' + r.currency + '\\n📅 ' + dateStr + '\\n' + r.category_vi + ' ✓';\nreturn [{ json: { chat_id: cb.chat_id, message_id: cb.message_id, text: text } }];"
+      }
+    },
+    {
+      "id": "edit-msg-remove-kb",
+      "name": "Remove Category Keyboard",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1720, 280],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, message_id: $json.message_id, parse_mode: 'Markdown', text: $json.text, reply_markup: { inline_keyboard: [] } }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "ask-note",
+      "name": "Ask Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1940, 280],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Parse Callback').first().json.chat_id, text: '📝 Thêm ghi chú không?\\nGửi tin nhắn hoặc /skip để bỏ qua.', reply_markup: { force_reply: true, selective: true, input_field_placeholder: 'VD: Ăn trưa với khách' } }) }}",
+        "options": {}
+      }
+    },
+
+    {
+      "id": "has-photo",
+      "name": "Has Photo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [620, 460],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "p1", "leftValue": "={{ $json.message.photo }}", "rightValue": "", "operator": { "type": "array", "operation": "notEmpty", "singleValue": true } }],
+          "combinator": "and"
+        }
+      }
+    },
+
+    {
+      "id": "extract-file-id",
+      "name": "Extract File ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [840, 380],
+      "parameters": {
+        "jsCode": "const msg = $input.first().json.message;\nconst photos = msg.photo;\nconst nameMap = { 661762284: 'HOANG NHAT HOANG', 1915103492: 'LE THI THANH DUNG' };\nconst sender_id = msg.from.id;\nconst sender_name = nameMap[sender_id] || (msg.from.first_name + (msg.from.last_name ? ' ' + msg.from.last_name : '')).toUpperCase();\nreturn [{ json: { file_id: photos[photos.length-1].file_id, chat_id: msg.chat.id, sender_id: sender_id, sender_name: sender_name } }];"
+      }
+    },
+    {
+      "id": "get-file-path",
+      "name": "Get File Path",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1060, 380],
+      "parameters": { "resource": "file", "operation": "get", "fileId": "={{ $json.file_id }}" },
+      "credentials": { "telegramApi": { "id": "1", "name": "Telegram Bot" } }
+    },
+    {
+      "id": "download-photo",
+      "name": "Download Photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1280, 380],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.telegram.org/file/bot{{ $env.TELEGRAM_BOT_TOKEN }}/{{ $json.result.file_path }}",
+        "responseFormat": "file",
+        "options": { "response": { "response": { "responseFormat": "file", "outputPropertyName": "receiptImage" } } }
+      }
+    },
+    {
+      "id": "parse-receipt",
+      "name": "Parse Receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1500, 380],
+      "parameters": {
+        "method": "POST", "url": "http://receipt-ocr:8000/process-receipt",
+        "contentType": "multipart-form-data", "sendBody": true,
+        "bodyParameters": { "parameters": [{ "parameterType": "formBinaryData", "name": "file", "inputDataFieldName": "receiptImage" }] },
+        "options": { "timeout": 90000 }
+      }
+    },
+    {
+      "id": "validate",
+      "name": "Validate & Format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1720, 380],
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\nconst src = $('Extract File ID').first().json;\nconst chatId = src.chat_id;\nif (body.error) return [{ json: { valid: false, reason: 'Không thể đọc ảnh.', chat_id: chatId } }];\nconst d = body.data || {};\nconst missing = [];\nif (d.total_amount == null) missing.push('số tiền');\nif (!d.currency) missing.push('đơn vị tiền');\nif (!d.date) missing.push('ngày');\nif (missing.length > 0) return [{ json: { valid: false, reason: 'Không tìm thấy: ' + missing.join(', '), chat_id: chatId } }];\nconst [y,m,day] = d.date.split('-');\nreturn [{ json: {\n  valid: true,\n  merchant:     d.merchant ? String(d.merchant).slice(0,255) : null,\n  total_amount: Number(d.total_amount),\n  currency:     String(d.currency).toUpperCase().slice(0,3),\n  date:         d.date,\n  time:         d.time || null,\n  date_display: (d.time ? d.time + ' ' : '') + day + '/' + m + '/' + y,\n  description:  d.description ? String(d.description).slice(0,500) : null,\n  ocr_text:     String(body.ocr_text||'').slice(0,2000),\n  chat_id:          chatId,\n  sender_id:        src.sender_id,\n  sender_name:      src.sender_name,\n  transaction_type: d.transaction_type === 'income' ? 'income' : 'expense',\n}}];\nconst out = result[0].json;\nout.owner_name = out.transaction_type === 'income' ? (out.merchant || null) : out.sender_name;\nreturn result;"
+      }
+    },
+    {
+      "id": "parse-ok",
+      "name": "Parse OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1940, 380],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "ok1", "leftValue": "={{ $json.valid }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equals" } }],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "save-draft",
+      "name": "Save Draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2160, 320],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO receipts (merchant, total_amount, currency, date, transaction_time, description, ocr_text, chat_id, sender_id, sender_name, owner_name, transaction_type, status, confirmed) VALUES ({{ $json.merchant ? \"'\"+ $json.merchant.replace(/'/g,\"''\") +\"'\" : 'null' }}, {{ $json.total_amount }}, '{{ $json.currency }}', '{{ $json.date }}', {{ $json.time ? \"'\"+ $json.time +\"'\" : 'null' }}, {{ $json.description ? \"'\"+ $json.description.replace(/'/g,\"''\") +\"'\" : 'null' }}, '{{ $json.ocr_text.replace(/'/g,\"''\").replace(/\\n/g,' ') }}', {{ $json.chat_id }}, {{ $json.sender_id }}, '{{ $json.sender_name.replace(/'/g,\"''\") }}', {{ $json.owner_name ? \"'\"+ $json.owner_name.replace(/'/g,\"''\") +\"'\" : 'null' }}, '{{ $json.transaction_type }}', 'draft', false) RETURNING id",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "2", "name": "Postgres n8n DB" } }
+    },
+    {
+      "id": "build-summary-payload",
+      "name": "Build Summary Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2380, 320],
+      "parameters": {
+        "jsCode": "const v = $('Validate & Format').first().json;\nconst id = $('Save Draft').first().json.id;\nconst amt = Number(v.total_amount).toLocaleString('vi-VN');\nconst descPart = v.description ? '\\n📄 ' + v.description : '';\nconst isIncome = v.transaction_type === 'income';\nconst typeIcon = isIncome ? '💚 Thu nhập' : '🔴 Chi tiêu';\nconst merchantLine = v.merchant ? '🏪 ' + v.merchant : '🏪 ❓ Chưa rõ — chọn bên dưới hoặc nhấn ✏️';\nconst text = '📋 *Đã đọc hoá đơn:*\\n' + merchantLine + '\\n💰 ' + amt + ' ' + v.currency + '\\n📅 ' + v.date_display + '\\n' + typeIcon + descPart + '\\n\\nChọn danh mục:';\nconst sid = String(id);\nconst merchantRow = !v.merchant ? [[{text: '👤 Hoàng (Anh)', callback_data: sid+':merchant_hoang'}, {text: '👤 Dung (Vợ)', callback_data: sid+':merchant_dung'}]] : [];\nconst keyboard = [...merchantRow, ...(isIncome ? [\n  [{text: '💼 Lương', callback_data: sid+':luong'}, {text: '📈 Đầu tư', callback_data: sid+':dau_tu'}],\n  [{text: '🤝 Được trả nợ', callback_data: sid+':tra_no'}, {text: '🎁 Thưởng', callback_data: sid+':thuong'}],\n  [{text: '💰 Thu khác', callback_data: sid+':thu_khac'}],\n  [{text: '✏️ Chỉnh sửa', callback_data: sid+':edit'}]\n] : [\n  [{text: '🍜 Ăn uống', callback_data: sid+':an_uong'}, {text: '🛍 Tiêu vặt', callback_data: sid+':tieu_vat'}],\n  [{text: '💸 Vay', callback_data: sid+':vay'}, {text: '🏠 Nhà cửa', callback_data: sid+':nha_cua'}],\n  [{text: '✏️ Chỉnh sửa', callback_data: sid+':edit'}]\n])];\nreturn [{ json: { chat_id: v.chat_id, receipt_id: id, text: text, keyboard: keyboard } }];"
+      }
+    },
+    {
+      "id": "send-summary",
+      "name": "Send Summary + Buttons",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2600, 320],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, parse_mode: 'Markdown', text: $json.text, reply_markup: { inline_keyboard: $json.keyboard } }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "send-error",
+      "name": "Send Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2160, 480],
+      "parameters": {
+        "resource": "message", "operation": "sendMessage",
+        "chatId": "={{ $json.chat_id }}",
+        "text": "=❌ Không đọc được hoá đơn.\n{{ $json.reason }}\n\nThử lại với ảnh chụp rõ hơn.",
+        "additionalFields": {}
+      },
+      "credentials": { "telegramApi": { "id": "1", "name": "Telegram Bot" } }
+    },
+
+    {
+      "id": "has-text",
+      "name": "Has Text?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [840, 560],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "t1", "leftValue": "={{ $json.message.text }}", "rightValue": "", "operator": { "type": "string", "operation": "exists", "singleValue": true } }],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "get-pending",
+      "name": "Get Pending Receipt",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1060, 560],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT id, status, merchant, total_amount, currency, date, transaction_time, category_vi, transaction_type FROM receipts WHERE chat_id = {{ $json.message.chat.id }} AND status IN ('draft','categorized') ORDER BY created_at DESC LIMIT 1",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "2", "name": "Postgres n8n DB" } }
+    },
+    {
+      "id": "pending-status",
+      "name": "Draft or Categorized?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1280, 560],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "s1", "leftValue": "={{ $json.status }}", "rightValue": "draft", "operator": { "type": "string", "operation": "equals" } }],
+          "combinator": "and"
+        }
+      }
+    },
+
+    {
+      "id": "parse-edit-fields",
+      "name": "Parse Edit Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 480],
+      "parameters": {
+        "jsCode": "const text = $('Telegram Trigger').first().json.message.text || '';\nconst chatId = $('Telegram Trigger').first().json.message.chat.id;\nconst draft = $('Get Pending Receipt').first().json;\n\nconst fields = {};\nfor (const line of text.split('\\n')) {\n  const idx = line.indexOf(':');\n  if (idx === -1) continue;\n  const key = line.slice(0, idx).trim().toLowerCase();\n  const val = line.slice(idx+1).trim();\n  if (val) fields[key] = val;\n}\n\nlet date = String(draft.date).split('T')[0];\nif (fields.date && fields.date.includes('/')) {\n  const [d,m,y] = fields.date.split('/');\n  date = y + '-' + m.padStart(2,'0') + '-' + d.padStart(2,'0');\n}\n\nlet time = draft.transaction_time ? String(draft.transaction_time).slice(0,5) : null;\nif (fields.time) time = fields.time.slice(0,5);\n\nconst [yr,mo,dy] = date.split('-');\nreturn [{ json: {\n  draft_id:     draft.id,\n  chat_id:      chatId,\n  merchant:     String(fields.merchant || draft.merchant).slice(0,255),\n  total_amount: Number(fields.amount || draft.total_amount),\n  currency:     String(fields.currency || draft.currency).toUpperCase().slice(0,3),\n  date:         date,\n  time:         time,\n  date_display: (time ? time + ' ' : '') + dy + '/' + mo + '/' + yr,\n  transaction_type: draft.transaction_type || 'expense',\n}}];"
+      }
+    },
+    {
+      "id": "update-draft",
+      "name": "Update Draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1720, 480],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE receipts SET merchant='{{ $json.merchant.replace(/'/g,\"''\") }}', total_amount={{ $json.total_amount }}, currency='{{ $json.currency }}', date='{{ $json.date }}', transaction_time={{ $json.time ? \"'\"+ $json.time +\"'\" : 'null' }} WHERE id={{ $json.draft_id }} RETURNING id",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "2", "name": "Postgres n8n DB" } }
+    },
+    {
+      "id": "build-resend-payload",
+      "name": "Build Resend Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1940, 480],
+      "parameters": {
+        "jsCode": "const v = $('Parse Edit Fields').first().json;\nconst id = $('Update Draft').first().json.id;\nconst amt = Number(v.total_amount).toLocaleString('vi-VN');\nconst merchantLine = v.merchant ? '🏪 ' + v.merchant : '🏪 ❓ Chưa rõ — nhấn ✏️ để chỉnh sửa';\nconst text = '✅ *Đã cập nhật! Chọn danh mục:*\\n' + merchantLine + '\\n💰 ' + amt + ' ' + v.currency + '\\n📅 ' + v.date_display;\nconst isIncome = v.transaction_type === 'income';\nconst sid = String(id);\nconst keyboard = isIncome ? [\n  [{text: '💼 Lương', callback_data: sid+':luong'}, {text: '📈 Đầu tư', callback_data: sid+':dau_tu'}],\n  [{text: '🤝 Được trả nợ', callback_data: sid+':tra_no'}, {text: '🎁 Thưởng', callback_data: sid+':thuong'}],\n  [{text: '💰 Thu khác', callback_data: sid+':thu_khac'}],\n  [{text: '✏️ Chỉnh sửa', callback_data: sid+':edit'}]\n] : [\n  [{text: '🍜 Ăn uống', callback_data: sid+':an_uong'}, {text: '🛍 Tiêu vặt', callback_data: sid+':tieu_vat'}],\n  [{text: '💸 Vay', callback_data: sid+':vay'}, {text: '🏠 Nhà cửa', callback_data: sid+':nha_cua'}],\n  [{text: '✏️ Chỉnh sửa', callback_data: sid+':edit'}]\n];\nreturn [{ json: { chat_id: v.chat_id, receipt_id: id, text: text, keyboard: keyboard } }];"
+      }
+    },
+    {
+      "id": "resend-summary",
+      "name": "Re-send Summary + Buttons",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2160, 480],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, parse_mode: 'Markdown', text: $json.text, reply_markup: { inline_keyboard: $json.keyboard } }) }}",
+        "options": {}
+      }
+    },
+
+    {
+      "id": "save-note",
+      "name": "Save Note to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1500, 640],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE receipts SET note = {{ $('Telegram Trigger').first().json.message.text.toLowerCase() === '/skip' ? 'null' : \"'\" + $('Telegram Trigger').first().json.message.text.replace(/'/g,\"''\") + \"'\" }}, status = 'confirmed', confirmed = true WHERE id = {{ $json.id }} RETURNING id, merchant, total_amount, currency, date, transaction_time, category_vi, note",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "2", "name": "Postgres n8n DB" } }
+    },
+    {
+      "id": "send-confirm",
+      "name": "Send Confirmation",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1720, 640],
+      "parameters": {
+        "resource": "message", "operation": "sendMessage",
+        "chatId": "={{ $('Telegram Trigger').first().json.message.chat.id }}",
+        "text": "=✅ *Đã lưu!*\n\n🏪 {{ $json.merchant }}\n💰 {{ $json.total_amount }} {{ $json.currency }}\n📅 {{ $json.transaction_time ? String($json.transaction_time).slice(0,5)+' ' : '' }}{{ $json.date.split('-').reverse().join('/') }}\n{{ $json.category_vi }}{{ $json.note ? '\\n📝 ' + $json.note : '' }}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "credentials": { "telegramApi": { "id": "1", "name": "Telegram Bot" } }
+    },
+
+    { "id": "ignore", "name": "Ignore", "type": "n8n-nodes-base.noOp", "typeVersion": 1, "position": [840, 680], "parameters": {} },
+
+    {
+      "id": "has-webapp-data",
+      "name": "Has Web App Data?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [620, 560],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "w1", "leftValue": "={{ $json.message.web_app_data }}", "rightValue": "", "operator": { "type": "object", "operation": "exists", "singleValue": true } }],
+          "combinator": "and"
+        }
+      }
+    },
+
+    {
+      "id": "parse-webapp-data",
+      "name": "Parse Web App Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [840, 460],
+      "parameters": {
+        "jsCode": "const msg = $input.first().json.message;\nconst raw = msg.web_app_data.data;\nconst d = JSON.parse(raw);\nconst chatId = msg.chat.id;\n\nlet date = null;\nif (d.date) {\n  if (d.date.includes('/')) {\n    const parts = d.date.split(' ');\n    const datePart = parts[parts.length - 1];\n    const [dd, mm, yyyy] = datePart.split('/');\n    date = yyyy + '-' + mm.padStart(2,'0') + '-' + dd.padStart(2,'0');\n  } else {\n    date = d.date;\n  }\n}\n\nconst time = d.time ? String(d.time).slice(0,5) : null;\nconst [y,m,dy] = (date||'').split('-');\nconst dateDisplay = date ? (time ? time+' ' : '') + dy+'/'+m+'/'+y : '';\n\nreturn [{ json: {\n  draft_id:     d.receipt_id,\n  chat_id:      chatId,\n  merchant:     d.merchant ? String(d.merchant).slice(0,255) : null,\n  total_amount: Number(d.amount),\n  currency:     String(d.currency||'VND').toUpperCase().slice(0,3),\n  date:         date,\n  time:         time,\n  date_display: dateDisplay,\n  transaction_type: 'expense',\n}}];"
+      }
+    },
+
+    {
+      "id": "get-receipt-type",
+      "name": "Get Receipt Type",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1060, 460],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT transaction_type FROM receipts WHERE id = {{ $json.draft_id }}",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "2", "name": "Postgres n8n DB" } }
+    },
+
+    {
+      "id": "merge-receipt-type",
+      "name": "Merge Receipt Type",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1280, 460],
+      "parameters": {
+        "jsCode": "const parsed = $('Parse Web App Data').first().json;\nconst typeRow = $('Get Receipt Type').first().json;\nreturn [{ json: { ...parsed, transaction_type: typeRow.transaction_type || 'expense' } }];"
+      }
+    },
+
+    {
+      "id": "is-reply-to-bot",
+      "name": "Is Reply to Bot?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1060, 560],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "r1", "leftValue": "={{ $json.message.reply_to_message.from.is_bot }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equals" } }],
+          "combinator": "and"
+        }
+      }
+    },
+    { "id": "ignore2", "name": "Ignore No Pending", "type": "n8n-nodes-base.noOp", "typeVersion": 1, "position": [1500, 740], "parameters": {} },
+
+    {
+      "id": "is-summary-cmd",
+      "name": "Is /summary?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1060, 560],
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [{ "id": "s1", "leftValue": "={{ $json.message.text }}", "rightValue": "/summary", "operator": { "type": "string", "operation": "startsWith" } }],
+          "combinator": "and"
+        }
+      }
+    },
+
+    {
+      "id": "get-monthly-summary",
+      "name": "Get Monthly Summary",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1280, 480],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT TO_CHAR(date, 'MM/YYYY') as month, category_vi, ROUND(SUM(total_amount)::numeric, 0) as total, currency FROM receipts WHERE confirmed = true GROUP BY TO_CHAR(date, 'MM/YYYY'), category_vi, currency ORDER BY TO_CHAR(date, 'MM/YYYY') DESC, category_vi",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "2", "name": "Postgres n8n DB" } }
+    },
+
+    {
+      "id": "format-summary",
+      "name": "Format Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 480],
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(r => r.json);\nconst chatId = $('Telegram Trigger').first().json.message.chat.id;\nif (rows.length === 0) {\n  return [{ json: { chat_id: chatId, text: '📊 Chưa có giao dịch nào được lưu.' } }];\n}\n// Group by month\nconst byMonth = {};\nfor (const row of rows) {\n  const m = row.month;\n  if (!byMonth[m]) byMonth[m] = [];\n  byMonth[m].push(row);\n}\nlet text = '📊 *Tổng chi tiêu theo tháng:*';\nfor (const [month, items] of Object.entries(byMonth)) {\n  const monthTotal = items.reduce((s, r) => s + Number(r.total), 0);\n  text += '\\n\\n📅 *' + month + '*';\n  for (const item of items) {\n    const cat = item.category_vi || '❓ Khác';\n    const amt = Number(item.total).toLocaleString('vi-VN');\n    text += '\\n  ' + cat + ': ' + amt + ' ' + item.currency;\n  }\n  text += '\\n  ─────────────';\n  text += '\\n  Tổng: ' + monthTotal.toLocaleString('vi-VN') + ' VND';\n}\nreturn [{ json: { chat_id: chatId, text: text } }];"
+      }
+    },
+
+    {
+      "id": "send-monthly-summary",
+      "name": "Send Monthly Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1720, 480],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "contentType": "json", "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, parse_mode: 'Markdown', text: $json.text }) }}",
+        "options": {}
+      }
+    }
+  ],
+
+  "connections": {
+    "Telegram Trigger":            { "main": [[{ "node": "Callback or Message?",       "type": "main", "index": 0 }]] },
+    "Callback or Message?":        { "main": [[{ "node": "Parse Callback",             "type": "main", "index": 0 }], [{ "node": "Has Photo?", "type": "main", "index": 0 }]] },
+    "Parse Callback":              { "main": [[{ "node": "Is Merchant Select?",        "type": "main", "index": 0 }]] },
+    "Is Merchant Select?":         { "main": [[{ "node": "Set Merchant",               "type": "main", "index": 0 }], [{ "node": "Edit or Category?", "type": "main", "index": 0 }]] },
+    "Set Merchant":                { "main": [[{ "node": "Answer Callback (Merchant)", "type": "main", "index": 0 }]] },
+    "Answer Callback (Merchant)":  { "main": [[{ "node": "Build Merchant Payload",     "type": "main", "index": 0 }]] },
+    "Build Merchant Payload":      { "main": [[{ "node": "Update Message Merchant",    "type": "main", "index": 0 }]] },
+    "Edit or Category?":           { "main": [[{ "node": "Get Draft Fields",           "type": "main", "index": 0 }], [{ "node": "Save Category", "type": "main", "index": 0 }]] },
+    "Get Draft Fields":            { "main": [[{ "node": "Answer Callback (Edit)",     "type": "main", "index": 0 }]] },
+    "Answer Callback (Edit)":      { "main": [[{ "node": "Build Edit Form Payload",    "type": "main", "index": 0 }]] },
+    "Build Edit Form Payload":     { "main": [[{ "node": "Send Edit Form",             "type": "main", "index": 0 }]] },
+    "Save Category":               { "main": [[{ "node": "Answer Callback (Category)", "type": "main", "index": 0 }]] },
+    "Answer Callback (Category)":  { "main": [[{ "node": "Build Remove KB Payload",   "type": "main", "index": 0 }]] },
+    "Build Remove KB Payload":     { "main": [[{ "node": "Remove Category Keyboard",  "type": "main", "index": 0 }]] },
+    "Remove Category Keyboard":    { "main": [[{ "node": "Ask Note",                  "type": "main", "index": 0 }]] },
+    "Has Photo?":                  { "main": [[{ "node": "Extract File ID",            "type": "main", "index": 0 }], [{ "node": "Has Web App Data?", "type": "main", "index": 0 }]] },
+    "Has Web App Data?":           { "main": [[{ "node": "Parse Web App Data",         "type": "main", "index": 0 }], [{ "node": "Has Text?", "type": "main", "index": 0 }]] },
+    "Parse Web App Data":          { "main": [[{ "node": "Get Receipt Type",            "type": "main", "index": 0 }]] },
+    "Get Receipt Type":            { "main": [[{ "node": "Merge Receipt Type",          "type": "main", "index": 0 }]] },
+    "Merge Receipt Type":          { "main": [[{ "node": "Update Draft",               "type": "main", "index": 0 }]] },
+    "Extract File ID":             { "main": [[{ "node": "Get File Path",              "type": "main", "index": 0 }]] },
+    "Get File Path":               { "main": [[{ "node": "Download Photo",             "type": "main", "index": 0 }]] },
+    "Download Photo":              { "main": [[{ "node": "Parse Receipt",              "type": "main", "index": 0 }]] },
+    "Parse Receipt":               { "main": [[{ "node": "Validate & Format",          "type": "main", "index": 0 }]] },
+    "Validate & Format":           { "main": [[{ "node": "Parse OK?",                 "type": "main", "index": 0 }]] },
+    "Parse OK?":                   { "main": [[{ "node": "Save Draft",                "type": "main", "index": 0 }], [{ "node": "Send Error", "type": "main", "index": 0 }]] },
+    "Save Draft":                  { "main": [[{ "node": "Build Summary Payload",     "type": "main", "index": 0 }]] },
+    "Build Summary Payload":       { "main": [[{ "node": "Send Summary + Buttons",    "type": "main", "index": 0 }]] },
+    "Has Text?":                   { "main": [[{ "node": "Is Reply to Bot?",         "type": "main", "index": 0 }], [{ "node": "Ignore",  "type": "main", "index": 0 }]] },
+    "Is Reply to Bot?":            { "main": [[{ "node": "Get Pending Receipt",       "type": "main", "index": 0 }], [{ "node": "Is /summary?", "type": "main", "index": 0 }]] },
+    "Is /summary?":                { "main": [[{ "node": "Get Monthly Summary",       "type": "main", "index": 0 }], [{ "node": "Ignore",          "type": "main", "index": 0 }]] },
+    "Get Monthly Summary":         { "main": [[{ "node": "Format Summary",            "type": "main", "index": 0 }]] },
+    "Format Summary":              { "main": [[{ "node": "Send Monthly Summary",      "type": "main", "index": 0 }]] },
+    "Get Pending Receipt":         { "main": [[{ "node": "Draft or Categorized?",     "type": "main", "index": 0 }]] },
+    "Draft or Categorized?":       { "main": [[{ "node": "Parse Edit Fields",         "type": "main", "index": 0 }], [{ "node": "Save Note to DB", "type": "main", "index": 0 }]] },
+    "Parse Edit Fields":           { "main": [[{ "node": "Update Draft",              "type": "main", "index": 0 }]] },
+    "Update Draft":                { "main": [[{ "node": "Build Resend Payload",      "type": "main", "index": 0 }]] },
+    "Build Resend Payload":        { "main": [[{ "node": "Re-send Summary + Buttons", "type": "main", "index": 0 }]] },
+    "Save Note to DB":             { "main": [[{ "node": "Send Confirmation",         "type": "main", "index": 0 }]] }
+  },
+
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "active": false
+}
