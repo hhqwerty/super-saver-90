@@ -24,30 +24,41 @@ Your task: return ONLY a valid JSON object — no markdown, no explanation, no e
 
 Required JSON format:
 {
-  "merchant": "<store, vendor, or transfer recipient/sender name, or null>",
-  "total_amount": <number only, no currency symbol, no commas, or null>,
-  "currency": "<ISO 4217 code e.g. USD GBP EUR VND, or null>",
-  "date": "<YYYY-MM-DD format, or null>",
-  "time": "<HH:mm format, or null>",
-  "description": "<transaction memo, lời nhắn, or brief item list, or null>",
-  "category": "<see category rules below>",
+  "merchant": "<string or null>",
+  "total_amount": <number, no commas or symbols, or null>,
+  "currency": "<ISO 4217 code e.g. VND, or null>",
+  "date": "<YYYY-MM-DD or null>",
+  "time": "<HH:mm or null>",
+  "description": "<transaction memo or brief item list or null>",
+  "category": "<see rules below>",
   "transaction_type": "<expense or income>"
 }
 
-Rules:
-- transaction_type = "income" if: amount is prefixed with "+", or text contains "Tiền vào", "Nhận tiền", "Số tiền nhận", or transfer shows only sender (Người gửi / Người chuyển) with no recipient (Tới tài khoản)
-- transaction_type = "expense" if: amount is prefixed with "-", or text contains "Tiền ra", "Chuyển đi", "Thanh toán", or transfer shows recipient (Tới tài khoản / To account)
-- transaction_type = "expense" for all shop/store receipts
-- For expense: category must be one of: Groceries Dining Transport Utilities Health Entertainment Shopping Transfer Other
-- For income: category must be one of: Salary Investment Debt_Repaid Bonus Other_Income
-- For bank transfers WITH recipient (Tới tài khoản / To account): merchant = recipient name, even if sender and recipient have the same name (own account transfer)
-- For bank transfers WITHOUT recipient (only Người gửi / Người chuyển): merchant = sender name, transaction_type = "income"
-- NEVER return null for merchant if a name appears under "Tới tài khoản" or "Người gửi" — always use that name
-- For bank transfers: total_amount = transfer amount (ignore minus/plus sign)
-- Date formats: DD/MM/YYYY → YYYY-MM-DD, "09:27 21/04/2026" → date="2026-04-21" time="09:27"
-- Currency: VND for Vietnamese Dong
-- total_amount must be a plain number (e.g. 39000 not "-VND 39,000")
-- time is HH:mm only (e.g. "09:27"), not full datetime
+Account owners: HOANG NHAT HOANG, LE THI THANH DUNG
+
+transaction_type rules (apply in this exact order, stop at first match):
+1. "Tới tài khoản" contains "HOANG NHAT HOANG" or "LE THI THANH DUNG" → income
+2. "Tới tài khoản" exists and is NOT an account owner → expense
+3. "Tới tài khoản" absent (only sender shown) → income
+4. No bank transfer fields present (shop/store receipt) → expense
+
+merchant rules:
+- income: merchant = name under "Từ tài khoản" (sender), or null if not shown
+- expense (bank transfer): merchant = name under "Tới tài khoản" (receiver)
+- expense (shop receipt): merchant = store/vendor name
+
+total_amount rules:
+- Always a positive number (ignore leading minus/plus sign)
+- Strip commas and currency symbols (e.g. "-VND 118,000" → 118000)
+
+category rules:
+- expense: one of: Groceries Dining Transport Utilities Health Entertainment Shopping Transfer Other
+- income: one of: Salary Investment Debt_Repaid Bonus Other_Income
+
+Other rules:
+- Date: DD/MM/YYYY → YYYY-MM-DD (e.g. "09:27 21/04/2026" → date="2026-04-21" time="09:27")
+- time: HH:mm only (e.g. "09:27")
+- currency: VND for Vietnamese Dong
 - If a field cannot be determined, use null
 - Output ONLY the JSON object, nothing else"""
 
@@ -156,7 +167,7 @@ async def process_receipt(file: UploadFile = File(...)):
             {"role": "user", "content": f"Receipt text:\n\n{ocr_text}"},
         ],
         "stream": False,
-        "options": {"temperature": 0, "num_predict": 256},
+        "options": {"temperature": 0, "num_predict": 512},
     }
 
     try:
