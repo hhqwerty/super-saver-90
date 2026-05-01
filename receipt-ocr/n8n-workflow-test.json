@@ -1,0 +1,53 @@
+{
+  "name": "TEST: Receipt Finance Tracker",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "test-receipt-tracker",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "webhookId": "test-receipt-tracker"
+    },
+    {
+      "parameters": {
+        "jsCode": "// TDD Test Runner for Validate & Format logic\n// Tests all 7 income/expense classification scenarios\n\nconst OWNERS = ['HOANG NHAT HOANG', 'LE THI THANH DUNG'];\n\nfunction validateAndFormat(body, src) {\n  const chatId = src.chat_id;\n  if (body.error) return { valid: false, reason: 'Không thể đọc ảnh.', chat_id: chatId };\n\n  const d = body.data || {};\n  const missing = [];\n  if (d.total_amount == null) missing.push('số tiền');\n  if (!d.currency)            missing.push('đơn vị tiền');\n  if (!d.date)                missing.push('ngày');\n  if (missing.length > 0) return { valid: false, reason: 'Không tìm thấy: ' + missing.join(', '), chat_id: chatId };\n\n  const ocrUpper = String(body.ocr_text || '').toUpperCase();\n  const toMatch = ocrUpper.match(/T(?:Ớ|Ơ|O)I\\s+T(?:À|A)I\\s+KHO(?:À|A)N[:\\s]+([A-Z][A-Z0-9\\s\\(\\)_\\-]+)/);\n  let txType;\n  if (toMatch) {\n    const receiver = toMatch[1].trim();\n    txType = OWNERS.some(o => receiver.includes(o)) ? 'income' : 'expense';\n  } else if (/T.I\\s+T.I\\s+KHO.N/.test(ocrUpper)) {\n    txType = d.transaction_type === 'income' ? 'income' : 'expense';\n  } else if (/T(?:Ừ|U)\\s+T(?:À|A)I\\s+KHO(?:À|A)N|NGU(?:Ờ|O)I\\s+G(?:Ử|U)I|NGU(?:Ờ|O)I\\s+CHUY(?:Ể|E)N/.test(ocrUpper)) {\n    txType = 'income';\n  } else {\n    txType = d.transaction_type === 'income' ? 'income' : 'expense';\n  }\n\n  const [y, m, day] = d.date.split('-');\n  return {\n    valid: true,\n    merchant:         d.merchant ? String(d.merchant).slice(0, 255) : null,\n    total_amount:     Number(d.total_amount),\n    currency:         String(d.currency).toUpperCase().slice(0, 3),\n    date:             d.date,\n    time:             d.time || null,\n    date_display:     (d.time ? d.time + ' ' : '') + day + '/' + m + '/' + y,\n    transaction_type: txType,\n    owner_name:       txType === 'income' ? (d.merchant || null) : src.sender_name,\n  };\n}\n\nconst MOCK_SRC = { chat_id: 123, sender_id: 661762284, sender_name: 'HOANG NHAT HOANG' };\n\nconst TEST_CASES = [\n  {\n    name: 'Case 1: Outgoing transfer (you to MOMO)',\n    input: {\n      data: { merchant: 'MOMO_PHUC LOC THO', total_amount: 118000, currency: 'VND', date: '2026-05-01', time: '19:47', transaction_type: 'expense' },\n      ocr_text: 'TECHCOMBANK\\n-VND 118,000\\n19:47 01/05/2026\\n\\nTu tai khoan\\n\\nHOANG NHAT HOANG\\nTechcombank\\n\\nToi tai khoan\\n\\nMOMO_PHUC LOC THO\\nVIETCAPITAL BANK'\n    },\n    expect: { transaction_type: 'expense', merchant: 'MOMO_PHUC LOC THO', owner_name: 'HOANG NHAT HOANG' }\n  },\n  {\n    name: 'Case 2: Incoming to you (sender shown)',\n    input: {\n      data: { merchant: 'NGUYEN VAN A', total_amount: 500000, currency: 'VND', date: '2026-05-01', time: '10:00', transaction_type: 'expense' },\n      ocr_text: 'TECHCOMBANK\\n+VND 500,000\\n10:00 01/05/2026\\n\\nTu tai khoan\\n\\nNGUYEN VAN A\\n\\nToi tai khoan\\n\\nHOANG NHAT HOANG\\nTechcombank'\n    },\n    expect: { transaction_type: 'income', merchant: 'NGUYEN VAN A', owner_name: 'NGUYEN VAN A' }\n  },\n  {\n    name: 'Case 3: Cross-bank incoming to you (no sender)',\n    input: {\n      data: { merchant: null, total_amount: 200000, currency: 'VND', date: '2026-05-01', time: '11:00', transaction_type: 'expense' },\n      ocr_text: 'TECHCOMBANK\\nVND 200,000\\n11:00 01/05/2026\\n\\nToi tai khoan\\n\\nHOANG NHAT HOANG\\nTechcombank'\n    },\n    expect: { transaction_type: 'income', merchant: null, owner_name: null }\n  },\n  {\n    name: 'Case 4: Wife sends out (her name hidden)',\n    input: {\n      data: { merchant: 'NGUYEN VAN B', total_amount: 300000, currency: 'VND', date: '2026-05-01', time: '12:00', transaction_type: 'expense' },\n      ocr_text: 'VIETCAPITAL BANK\\nVND 300,000\\n12:00 01/05/2026\\n\\nToi tai khoan\\n\\nNGUYEN VAN B\\nSome Bank'\n    },\n    expect: { transaction_type: 'expense', merchant: 'NGUYEN VAN B', owner_name: 'HOANG NHAT HOANG' }\n  },\n  {\n    name: 'Case 5: Incoming to wife',\n    input: {\n      data: { merchant: 'TRAN THI C', total_amount: 1000000, currency: 'VND', date: '2026-05-01', time: '13:00', transaction_type: 'expense' },\n      ocr_text: 'VIETCAPITAL BANK\\n+VND 1,000,000\\n13:00 01/05/2026\\n\\nTu tai khoan\\n\\nTRAN THI C\\n\\nToi tai khoan\\n\\nLE THI THANH DUNG'\n    },\n    expect: { transaction_type: 'income', merchant: 'TRAN THI C', owner_name: 'TRAN THI C' }\n  },\n  {\n    name: 'Case 6: Missing required fields (invalid)',\n    input: {\n      data: { merchant: 'SHOP', total_amount: null, currency: 'VND', date: '2026-05-01', transaction_type: 'expense' },\n      ocr_text: 'some shop receipt'\n    },\n    expect: { valid: false }\n  },\n  {\n    name: 'Case 7: Shop receipt (no bank fields)',\n    input: {\n      data: { merchant: 'HIGHLANDS COFFEE', total_amount: 55000, currency: 'VND', date: '2026-05-01', time: '08:30', transaction_type: 'expense' },\n      ocr_text: 'HIGHLANDS COFFEE\\nCAM CHUOI TUYET 55,000\\nTOTAL 55,000 VND\\n08:30 01/05/2026'\n    },\n    expect: { transaction_type: 'expense', merchant: 'HIGHLANDS COFFEE', owner_name: 'HOANG NHAT HOANG' }\n  }\n];\n\nconst results = [];\nlet allPassed = true;\n\nfor (const tc of TEST_CASES) {\n  const out = validateAndFormat(tc.input, MOCK_SRC);\n  const errors = [];\n  for (const [key, expected] of Object.entries(tc.expect)) {\n    const actual = out[key];\n    if (actual !== expected) {\n      errors.push(`${key}: expected \"${expected}\", got \"${actual}\"`);\n    }\n  }\n  const passed = errors.length === 0;\n  if (!passed) allPassed = false;\n  results.push({ test: tc.name, status: passed ? 'PASS' : 'FAIL', errors: errors.join(' | ') || null });\n}\n\nconst summary = results.map(r => `${r.status === 'PASS' ? 'PASS' : 'FAIL'} ${r.test}${r.errors ? ' -> ' + r.errors : ''}`).join('\\n');\n\nreturn [{ json: {\n  passed: allPassed,\n  total: results.length,\n  passed_count: results.filter(r => r.status === 'PASS').length,\n  failed_count: results.filter(r => r.status === 'FAIL').length,\n  results,\n  summary\n}}];"
+      },
+      "id": "run-tests",
+      "name": "Run All Tests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": "={{ $json.passed ? 200 : 500 }}"
+        }
+      },
+      "id": "respond-node",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [440, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Run All Tests", "type": "main", "index": 0 }]]
+    },
+    "Run All Tests": {
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": true
+}
