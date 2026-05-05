@@ -121,8 +121,10 @@ def extract_json(text: str) -> dict:
         raise ValueError(f"No JSON object found in: {text!r}")
     raw = match.group()
     # Fix invalid JSON escape sequences (e.g. \B, \M from OCR text embedded in strings)
-    # Replace any backslash not followed by a valid JSON escape char with \\
-    raw = re.sub(r'\\(?!["\\/bfnrtu0-9])', r'\\\\', raw)
+    # Match \\ (valid double-backslash, keep) OR \X (invalid escape, fix to \\X)
+    raw = re.sub(r'\\\\|\\([^"\\/bfnrtu0-9])',
+                 lambda m: m.group(0) if m.group(1) is None else '\\\\' + m.group(1),
+                 raw)
     return json.loads(raw)
 
 
